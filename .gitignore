@@ -1,6 +1,7 @@
 # build and run
 venv/*
 *pycache*
+*.pyc
 
 # specific to this project
 input_data/*
