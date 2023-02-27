@@ -36,16 +36,30 @@ def create_tables():
         )
         """,
         """
-        DROP TABLE IF EXISTS CLIENT_USAGE_DATA
+        DROP TABLE IF EXISTS CLIENT_USAGE_DATA_RAW
         """,
         """
-        CREATE TABLE CLIENT_USAGE_DATA(
+        CREATE TABLE CLIENT_USAGE_DATA_RAW(
             LINEITEMDESCRIPTION VARCHAR,
             OPERATION VARCHAR,
             USAGETYPE VARCHAR,
             TIMEINTERVAL VARCHAR,
             PRODUCTCODE VARCHAR,
             USAGEAMOUNT VARCHAR,
+            PUBLICONDEMANDRATE VARCHAR
+        )
+        """,
+        """
+        DROP TABLE IF EXISTS CLIENT_USAGE_DATA_CLEANED
+        """,
+        """
+        CREATE TABLE CLIENT_USAGE_DATA_CLEANED(
+            OPERATION VARCHAR,
+            USAGETYPE VARCHAR,
+            TIMEINTERVAL VARCHAR,
+            START_TIME VARCHAR,
+            END_TIME VARCHAR,
+            SUM_USAGEAMOUNT NUMERIC,
             PUBLICONDEMANDRATE VARCHAR
         )
         """
@@ -85,6 +99,51 @@ def clean_insert(table_name,file_name,separator):
         if conn is not None:
             conn.close()
 
+def client_raw_to_cleaned():
+    command = """
+    INSERT INTO CLIENT_USAGE_DATA_CLEANED
+    SELECT
+        OPERATION,
+        USAGETYPE,
+        TIMEINTERVAL,
+        SPLIT_PART(TIMEINTERVAL,'/',1) AS START_TIME,
+        SPLIT_PART(TIMEINTERVAL,'/',2) AS END_TIME,
+        SUM(CEIL(USAGEAMOUNT::NUMERIC)) SUM_USAGEAMOUNT,
+        PUBLICONDEMANDRATE
+    FROM CLIENT_USAGE_DATA_RAW
+	WHERE OPERATION LIKE 'RUNINSTANCES%'
+    GROUP BY OPERATION,	USAGETYPE, TIMEINTERVAL, PUBLICONDEMANDRATE
+	
+	
+	UNION ALL
+	
+	SELECT
+        OPERATION,
+        USAGETYPE,
+        TIMEINTERVAL,
+        SPLIT_PART(TIMEINTERVAL,'/',1) AS START_TIME,
+        SPLIT_PART(TIMEINTERVAL,'/',2) AS END_TIME,
+        SUM(USAGEAMOUNT::NUMERIC) SUM_USAGEAMOUNT,
+        PUBLICONDEMANDRATE
+    FROM CLIENT_USAGE_DATA_RAW
+	WHERE OPERATION NOT LIKE 'RUNINSTANCES%'
+    GROUP BY OPERATION,	USAGETYPE, TIMEINTERVAL, PUBLICONDEMANDRATE
+    """
+
+    conn = None
+    try:
+        conn,cur = create_conn_postgres()
+
+        cur.execute(command)
+    
+        cur.close()
+        conn.commit()
+    except (Exception, psycopg2.DatabaseError) as error:
+        print(error)
+    finally:
+        if conn is not None:
+            conn.close()
+
 def load_data():
     clean_insert(
         table_name = 'saving_plan_rates',
@@ -92,7 +151,9 @@ def load_data():
         separator = ',')
     
     clean_insert(
-        table_name = 'client_usage_data',
+        table_name = 'client_usage_data_raw',
         file_name = 'input_data/currfile.csv',
         separator = '|')
+    
+    client_raw_to_cleaned()
     

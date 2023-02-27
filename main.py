@@ -12,5 +12,5 @@ def file_reader():
     print(type(curr_data))
 
 if __name__ == '__main__':
-    #postgres.create_tables()
+    postgres.create_tables()
     postgres.load_data()
