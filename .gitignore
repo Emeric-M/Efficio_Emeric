@@ -5,3 +5,4 @@ venv/*
 
 # specific to this project
 input_data/*
+utils/secrets.py
