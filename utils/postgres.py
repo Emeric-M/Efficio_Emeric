@@ -60,7 +60,7 @@ def create_tables():
             START_TIME VARCHAR,
             END_TIME VARCHAR,
             SUM_USAGEAMOUNT NUMERIC,
-            PUBLICONDEMANDRATE VARCHAR
+            PUBLICONDEMANDRATE NUMERIC
         )
         """
     )
@@ -109,9 +109,12 @@ def client_raw_to_cleaned():
         SPLIT_PART(TIMEINTERVAL,'/',1) AS START_TIME,
         SPLIT_PART(TIMEINTERVAL,'/',2) AS END_TIME,
         SUM(CEIL(USAGEAMOUNT::NUMERIC)) SUM_USAGEAMOUNT,
-        PUBLICONDEMANDRATE
+        CASE 
+            WHEN PUBLICONDEMANDRATE = '' THEN 0
+            ELSE PUBLICONDEMANDRATE::NUMERIC
+        END PUBLICONDEMANDRATE
     FROM CLIENT_USAGE_DATA_RAW
-	WHERE OPERATION LIKE 'RUNINSTANCES%'
+	WHERE UPPER(OPERATION) LIKE 'RUNINSTANCES%'
     GROUP BY OPERATION,	USAGETYPE, TIMEINTERVAL, PUBLICONDEMANDRATE
 	
 	
@@ -124,9 +127,12 @@ def client_raw_to_cleaned():
         SPLIT_PART(TIMEINTERVAL,'/',1) AS START_TIME,
         SPLIT_PART(TIMEINTERVAL,'/',2) AS END_TIME,
         SUM(USAGEAMOUNT::NUMERIC) SUM_USAGEAMOUNT,
-        PUBLICONDEMANDRATE
+        CASE 
+            WHEN PUBLICONDEMANDRATE = '' THEN 0
+            ELSE PUBLICONDEMANDRATE::NUMERIC
+        END PUBLICONDEMANDRATE
     FROM CLIENT_USAGE_DATA_RAW
-	WHERE OPERATION NOT LIKE 'RUNINSTANCES%'
+	WHERE UPPER(OPERATION) NOT LIKE 'RUNINSTANCES%'
     GROUP BY OPERATION,	USAGETYPE, TIMEINTERVAL, PUBLICONDEMANDRATE
     """
 
@@ -156,4 +162,82 @@ def load_data():
         separator = '|')
     
     client_raw_to_cleaned()
+
+def get_sum_extra_due(commit_hourly_amount,start_date,end_date):
+    command_no_var = """
+    with client_saving_ranked as (
+    select 	
+        client.operation,
+        client.usagetype,
+        client.timeinterval,
+        client.start_time,
+        client.end_time,
+        client.sum_usageamount,
+        client.publicondemandrate as od_rate,
+        saving.rate as dis_rate,
+        saving.perc_savings,
+        row_number() over(
+            partition by client.timeinterval
+            order by saving.perc_savings desc, client.usagetype 
+            --make sure output is always the same if 2 equals perc_saving on same timeinterval
+        ) as row_number, --not mandatory, kept for readability
+        {0} - sum(sum_usageamount::numeric * saving.rate::numeric)  over(
+            partition by client.timeinterval
+            order by saving.perc_savings desc, client.usagetype 
+            --make sure output is always the same if 2 equals perc_saving on same timeinterval
+        ) as saving_balance		 
+    from client_usage_data_cleaned client
+    left join saving_plan_rates saving
+        on client.operation = saving.operation
+        and client.usagetype = saving.usagetype
+    where 
+        client.start_time >= '{1}'
+        and client.end_time < '{2}'
+    ),
+    client_with_prev_saving as (
+    select
+        *,
+        lag(saving_balance,1) over(
+            partition by timeinterval
+            order by perc_savings desc, usagetype 
+            --make sure output is always the same if 2 equals perc_saving on same timeinterval
+        ) as prev_saving_balance	
+    from client_saving_ranked
+    ),
+    client_saving_total as (
+    select
+        *,
+        case
+            when perc_savings is null then sum_usageamount * od_rate::numeric
+            when saving_balance > 0 then 0 
+            when (prev_saving_balance > 0 and saving_balance <= 0)
+                then (dis_rate::numeric * sum_usageamount - prev_saving_balance) / (1 - perc_savings::numeric)
+            else sum_usageamount * od_rate::numeric
+        end as extra_due,
+        sum_usageamount * od_rate::numeric as no_commit_price
+    from client_with_prev_saving
+    )
+    select 
+        round(sum(extra_due),2) as sum_extra_due,
+	    round(sum(no_commit_price),2) as sum_no_commit_price
+    from client_saving_total
+    """
+
+    command = command_no_var.format(commit_hourly_amount,start_date,end_date)
+
+    conn = None
+    try:
+        conn,cur = create_conn_postgres()
+
+        cur.execute(command)
+        result = cur.fetchone()
     
+        cur.close()
+        conn.commit()
+
+        return result
+    except (Exception, psycopg2.DatabaseError) as error:
+        print(error)
+    finally:
+        if conn is not None:
+            conn.close()
